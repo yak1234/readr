@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn>=0.30
+huggingface_hub>=0.24
+ctranslate2>=4.5
+sentencepiece>=0.2
+spacy>=3.8,<3.9
+fr_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl

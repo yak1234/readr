@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+release/
+sidecar/.venv/
+sidecar/models/
+sidecar/data/
+sidecar/__pycache__/
+sidecar/.pytest_cache/
+*.log
+out/
+.superpowers/
