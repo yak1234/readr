@@ -4,6 +4,7 @@ import React from "react";
 import * as SwitchPrimitive from "@radix-ui/react-switch";
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import type { ChromeTokens } from "../lib/theme";
+import { useTranslation } from "react-i18next";
 
 export function Switch({ checked, onCheckedChange, c }: { checked: boolean; onCheckedChange: (v: boolean) => void; c: ChromeTokens }) {
   return (
@@ -39,6 +40,7 @@ export function Switch({ checked, onCheckedChange, c }: { checked: boolean; onCh
 }
 
 export function Slider({ value, onChange, min, max, step, c }: { value: number; onChange: (v: number) => void; min: number; max: number; step: number; c: ChromeTokens }) {
+  const { t } = useTranslation();
   return (
     <SliderPrimitive.Root
       value={[value]}
@@ -52,7 +54,7 @@ export function Slider({ value, onChange, min, max, step, c }: { value: number; 
         <SliderPrimitive.Range style={{ position: "absolute", height: "100%", borderRadius: 2, background: c.accent }} />
       </SliderPrimitive.Track>
       <SliderPrimitive.Thumb
-        aria-label="Text size"
+        aria-label={t("panel.textSize")}
         style={{ display: "block", width: 12, height: 12, borderRadius: 999, background: c.text, boxShadow: "0 1px 3px rgba(0,0,0,0.25)", cursor: "grab" }}
       />
     </SliderPrimitive.Root>
@@ -105,5 +107,14 @@ export function ChipButton({
     >
       {children}
     </button>
+  );
+}
+
+export function ToggleRow({ c, label, checked, onChange }: { c: ChromeTokens; label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+      <span style={{ fontSize: 12, color: c.body }}>{label}</span>
+      <Switch c={c} checked={checked} onCheckedChange={onChange} />
+    </div>
   );
 }

@@ -1,0 +1,6 @@
+-r requirements.txt
+# What the packaged app needs beyond the translator's own list (see scripts/build-runtime.mjs):
+# the voice server's number spelling, and yt-dlp for "Use my browser's login".
+# The Python NeMo voice (requirements-tts.txt) is not shipped: the packaged app speaks through NeMo-Speech.cpp.
+num2words==0.5.14
+yt-dlp==2026.10.26

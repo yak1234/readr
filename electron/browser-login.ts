@@ -6,17 +6,19 @@
 // and how to decrypt it (macOS asks once for Keychain access). Only cookies for
 // the configured sites are imported; the temporary export is deleted at once.
 
-import { Session } from "electron";
+import { app, Session } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ytDlp } from "./video";
+import { getDomain } from "tldts";
+import { cookieAllowed, isBlockedHost } from "./cookie-policy";
+import { here, pythonEnv, ytDlpHere } from "./runtime-paths";
 
 export const BROWSERS = ["vivaldi", "safari", "chrome", "brave", "firefox", "edge", "opera"] as const;
 export type Browser = (typeof BROWSERS)[number];
 
-interface JarCookie {
+export interface JarCookie {
   domain: string;
   path: string;
   secure: boolean;
@@ -44,19 +46,18 @@ export function parseCookieJar(text: string): JarCookie[] {
   return out;
 }
 
-const matchesHost = (domain: string, hosts: string[]) => {
-  const d = domain.replace(/^\./, "");
-  return hosts.some((h) => d === h || d.endsWith(`.${h}`) || h.endsWith(`.${d}`));
-};
+// Cookie policy (news hosts only, never Google) lives in cookie-policy.ts.
 
 function exportJar(browser: Browser, jar: string): Promise<void> {
   return new Promise((resolve, reject) => {
     // yt-dlp needs a URL to run; it saves the cookie jar even though this one
-    // isn't a video.
+    // isn't a page of news.
+    // yt-dlp ships with Readr, inside its Python (see runtime-paths).
+    const ytDlp = ytDlpHere();
     execFile(
-      ytDlp(),
-      ["--cookies-from-browser", browser, "--cookies", jar, "--simulate", "--no-warnings", "--quiet", "https://www.lemonde.fr/"],
-      { timeout: 120_000 },
+      ytDlp.command,
+      [...ytDlp.args, "--ignore-config", "--cookies-from-browser", browser, "--cookies", jar, "--simulate", "--no-warnings", "--quiet", "https://www.lemonde.fr/"],
+      { timeout: 120_000, windowsHide: true, env: { ...process.env, ...(process.env.READR_YTDLP ? {} : pythonEnv(here())) } },
       (err, _stdout, stderr) => {
         if (fs.existsSync(jar)) return resolve();
         const line = stderr.split("\n").find((l) => l.startsWith("ERROR")) ?? err?.message ?? "unknown error";
@@ -66,12 +67,38 @@ function exportJar(browser: Browser, jar: string): Promise<void> {
   });
 }
 
+/** Cookie counts per site (registrable domain), biggest first. Google, YouTube and
+ * the like are dropped here, so they can never be offered. */
+export function groupCookieSites(jar: JarCookie[]): { site: string; cookies: number }[] {
+  const counts = new Map<string, number>();
+  for (const c of jar) {
+    const host = c.domain.replace(/^\./, "").toLowerCase();
+    if (isBlockedHost(host)) continue;
+    const site = getDomain(host);
+    if (!site || isBlockedHost(site)) continue;
+    counts.set(site, (counts.get(site) ?? 0) + 1);
+  }
+  return [...counts].map(([site, cookies]) => ({ site, cookies })).sort((a, b) => b.cookies - a.cookies || a.site.localeCompare(b.site));
+}
+
+/** Which sites the browser holds logins for. Only names and counts leave this function. */
+export async function listBrowserSites(browser: Browser): Promise<{ site: string; cookies: number }[]> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "readr-cookies-"));
+  const jar = path.join(dir, "jar.txt");
+  try {
+    await exportJar(browser, jar);
+    return groupCookieSites(parseCookieJar(fs.readFileSync(jar, "utf8")));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 export async function importBrowserLogins(browser: Browser, session: Session, hosts: string[]): Promise<{ imported: number; domains: string[] }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "readr-cookies-"));
   const jar = path.join(dir, "jar.txt");
   try {
     await exportJar(browser, jar);
-    const wanted = parseCookieJar(fs.readFileSync(jar, "utf8")).filter((c) => matchesHost(c.domain, hosts));
+    const wanted = parseCookieJar(fs.readFileSync(jar, "utf8")).filter((c) => cookieAllowed(c.domain, hosts));
     const domains = new Set<string>();
     let imported = 0;
     for (const c of wanted) {

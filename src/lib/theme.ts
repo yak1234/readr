@@ -12,13 +12,15 @@ export interface ReadingTokens {
   border: string;
   sentenceHover: string;
   activeSentence: string;
+  /** The phrase a right-click selection snapped to. */
+  snapHighlight: string;
 }
 
 export const readingTokens: Record<ReadingStyle, ReadingTokens> = {
-  light: { bg: "#FAFAF7", text: "#1C1B18", secondary: "#6B6963", border: "#E8E6E0", sentenceHover: "rgba(184,169,138,0.10)", activeSentence: "rgba(201,160,96,0.20)" },
-  sepia: { bg: "#F5EFE0", text: "#3A2F1E", secondary: "#7A6A4F", border: "#DED3BE", sentenceHover: "rgba(184,129,58,0.10)", activeSentence: "rgba(184,129,58,0.22)" },
-  dark: { bg: "#2A2825", text: "#E8E6E0", secondary: "#A8A6A0", border: "#3E3C38", sentenceHover: "rgba(212,168,83,0.10)", activeSentence: "rgba(212,168,83,0.22)" },
-  paper: { bg: "#F9F6EF", text: "#2E2C28", secondary: "#6B6963", border: "#E2DDD4", sentenceHover: "rgba(184,152,96,0.10)", activeSentence: "rgba(184,152,96,0.22)" },
+  light: { bg: "#FAFAF7", text: "#1C1B18", secondary: "#6B6963", border: "#E8E6E0", sentenceHover: "rgba(184,169,138,0.10)", activeSentence: "rgba(201,160,96,0.20)", snapHighlight: "rgba(201,160,96,0.32)" },
+  sepia: { bg: "#F5EFE0", text: "#3A2F1E", secondary: "#7A6A4F", border: "#DED3BE", sentenceHover: "rgba(184,129,58,0.10)", activeSentence: "rgba(184,129,58,0.22)", snapHighlight: "rgba(184,129,58,0.32)" },
+  dark: { bg: "#2A2825", text: "#E8E6E0", secondary: "#A8A6A0", border: "#3E3C38", sentenceHover: "rgba(212,168,83,0.10)", activeSentence: "rgba(212,168,83,0.22)", snapHighlight: "rgba(212,168,83,0.34)" },
+  paper: { bg: "#F9F6EF", text: "#2E2C28", secondary: "#6B6963", border: "#E2DDD4", sentenceHover: "rgba(184,152,96,0.10)", activeSentence: "rgba(184,152,96,0.22)", snapHighlight: "rgba(184,152,96,0.32)" },
 };
 
 export interface ChromeTokens {
@@ -78,4 +80,17 @@ export const fontFamilyMap: Record<ReadingFont, string> = {
 };
 
 export const UI_FONT = "'Inter', system-ui, sans-serif";
+/** The serif the popups and the floating window set words in. */
+export const SERIF = fontFamilyMap.georgia;
 export const ARABIC_FONT = "'Noto Naskh Arabic', Georgia, serif";
+
+/** Faces for scripts the reading serifs don't set well, by ISO 15924 code, and how much larger to set
+ * them so they read at the same size as Latin text. Other scripts use the reading font (and system fallback). */
+const SCRIPT_TYPE: Record<string, { family: string; scale: number }> = {
+  Arab: { family: ARABIC_FONT, scale: 1.1 },
+};
+
+/** The face for content in a script: its own, else `base`. */
+export const contentFont = (script: string, base: string = SERIF): string => SCRIPT_TYPE[script]?.family ?? base;
+/** How much larger to set content in a script (1 for most). */
+export const contentScale = (script: string): number => SCRIPT_TYPE[script]?.scale ?? 1;

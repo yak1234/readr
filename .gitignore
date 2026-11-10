@@ -10,3 +10,6 @@ sidecar/.pytest_cache/
 *.log
 out/
 .superpowers/
+sidecar/.venv-tts/
+sidecar/nemo-speech/
+.codebase-tutor/

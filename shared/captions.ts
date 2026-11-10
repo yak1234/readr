@@ -1,11 +1,11 @@
-// Turns YouTube captions into timed sentences. YouTube's "json3" format gives a
-// start time for every word, so sentences can be cut with the same splitter as
-// articles and still know exactly when each one is spoken.
+// Turns timed words (from the live recogniser) into timed sentences, cut with the
+// same splitter as articles, so each one knows exactly when it is spoken.
 
 import { splitSentences } from "./segment";
+import { DEFAULT_LANG } from "./languages";
 
 export interface Word {
-  text: string; // includes its leading space, as YouTube sends it
+  text: string; // may carry a leading space
   start: number; // seconds
 }
 
@@ -15,27 +15,6 @@ export interface Cue {
   end: number; // seconds
 }
 
-interface Json3 {
-  events?: { tStartMs?: number; segs?: { utf8?: string; tOffsetMs?: number }[] }[];
-}
-
-export function parseJson3(data: Json3): Word[] {
-  const words: Word[] = [];
-  for (const event of data.events ?? []) {
-    const base = event.tStartMs ?? 0;
-    for (const seg of event.segs ?? []) {
-      const text = (seg.utf8 ?? "").replace(/\n/g, " ");
-      if (!text.trim()) continue;
-      // Manual captions put a whole line in one segment; start a new word boundary
-      // between events so lines don't run together.
-      const prev = words[words.length - 1];
-      const needsSpace = prev && !/^\s/.test(text) && seg.tOffsetMs === undefined;
-      words.push({ text: needsSpace ? ` ${text}` : text, start: (base + (seg.tOffsetMs ?? 0)) / 1000 });
-    }
-  }
-  return words;
-}
-
 /** A sentence longer than this many words is split at a comma, or failing that,
  * evenly, so a cue fits on screen and is a sensible unit to loop. */
 const MAX_WORDS = 28;
@@ -43,15 +22,19 @@ const MAX_WORDS = 28;
 const TAIL = 0.6;
 const MAX_GAP = 1.5;
 
-export function wordsToCues(words: Word[], lang = "fr"): Cue[] {
+export function wordsToCues(words: Word[], lang = DEFAULT_LANG): Cue[] {
   if (words.length === 0) return [];
 
   // Join the words and remember where each one starts in the joined text.
+  // Whitespace is normalised as the text is built (one space between words),
+  // because the sentence splitter collapses it and its output is searched here.
   let text = "";
   const offsets: number[] = [];
   for (const w of words) {
-    offsets.push(text.length + (w.text.length - w.text.trimStart().length));
-    text += w.text;
+    const word = w.text.trim();
+    const sep = text && /\s/.test(w.text[0] ?? "") ? " " : text && /\s$/.test(words[offsets.length - 1]?.text ?? "") ? " " : "";
+    offsets.push(text.length + sep.length);
+    text += sep + word;
   }
 
   // Map each sentence back to the index of its first word.

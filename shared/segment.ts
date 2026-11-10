@@ -2,6 +2,8 @@
 // Intl.Segmenter does the heavy lifting; we then re-join splits that happen
 // after common abbreviations ("M.", "Mme", "av. J.-C.", initials...).
 
+import { DEFAULT_LANG } from "./languages";
+
 const ABBREVIATIONS = new Set(
   [
     "m", "mm", "mme", "mmes", "mlle", "mlles", "dr", "pr", "me", "mgr", "st", "ste",
@@ -28,13 +30,21 @@ function getSegmenter(lang: string): Intl.Segmenter {
   return segmenter;
 }
 
-export function splitSentences(text: string, lang = "fr"): string[] {
+export function splitSentences(text: string, lang = DEFAULT_LANG): string[] {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean) return [];
   const raw = Array.from(getSegmenter(lang).segment(clean), (s) => s.segment);
 
   const merged: string[] = [];
-  for (const piece of raw) {
+  for (let piece of raw) {
+    // A closing quote after the final stop belongs to the sentence it closes.
+    const closer = piece.match(/^\s*[»”"]+/u)?.[0];
+    const last = merged.length - 1;
+    if (closer && last >= 0 && (!closer.includes('"') || (merged[last].match(/"/g) ?? []).length % 2 === 1)) {
+      merged[last] += closer.trimStart();
+      piece = piece.slice(closer.length);
+      if (!piece.trim()) continue;
+    }
     const prev = merged[merged.length - 1];
     const continuesLowercase = /^\s*\p{Ll}/u.test(piece) && !/[.!?…»"”]\s*$/u.test(prev ?? "");
     if (prev !== undefined && (endsWithAbbreviation(prev) || continuesLowercase)) {
@@ -70,4 +80,14 @@ export function tokenize(sentence: string): Token[] {
   }
   if (last < sentence.length) tokens.push({ text: sentence.slice(last), isWord: false });
   return tokens;
+}
+
+/** `tokenize`, with each token's start in the sentence (UTF-16 offset, as the DOM and selections count). */
+export function tokenizeWithOffsets(sentence: string): (Token & { start: number })[] {
+  let at = 0;
+  return tokenize(sentence).map((t) => {
+    const start = at;
+    at += t.text.length;
+    return { ...t, start };
+  });
 }

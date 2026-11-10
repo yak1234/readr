@@ -1,19 +1,25 @@
-// Tiny JSON-file store in Electron's userData folder.
-// One file per article keeps writes small; an index file keeps the sidebar fast.
+// Readr's stores. Articles, translations and saved words live in the database, through
+// library.ts; this module keeps the small configuration files (sources, sections, stations,
+// channels, logins) as JSON in Electron's userData folder.
 
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import type { Article, ArticleSummary, VocabEntry } from "../shared/types";
+import { sanitizeStations } from "./stations";
+import { sanitizeChannels } from "./channels";
+import type { Library } from "./library";
+import type { Classification } from "../shared/site-kinds";
+import type { SavedChannel, SavedStation, Article, ArticleSummary, UserSource, Section } from "../shared/types";
+
+export { articleIdFor } from "./library";
 
 const root = () => path.join(app.getPath("userData"), "library");
-const articlesDir = () => path.join(root(), "articles");
-const indexFile = () => path.join(root(), "index.json");
-const vocabFile = () => path.join(root(), "vocab.json");
+
+/** The folder of the JSON files, the old library's among them (kept as a backup after the upgrade). */
+export const libraryDir = root;
 
 function ensureDirs() {
-  fs.mkdirSync(articlesDir(), { recursive: true });
+  fs.mkdirSync(root(), { recursive: true });
 }
 
 function readJson<T>(file: string, fallback: T): T {
@@ -30,67 +36,92 @@ function writeJson(file: string, data: unknown) {
   fs.renameSync(tmp, file);
 }
 
-export function articleIdFor(url: string): string {
-  const u = new URL(url);
-  u.hash = "";
-  u.search = "";
-  return crypto.createHash("sha1").update(u.toString()).digest("hex").slice(0, 16);
+// ---------------------------------------------------------------- library (database)
+
+let library: Library | null = null;
+
+/** Set once the library's upgrade has succeeded (see library-startup.ts); null detaches it. */
+export function attachLibrary(lib: Library | null) {
+  library = lib;
 }
 
-function summarize(a: Article): ArticleSummary {
-  const { blocks: _b, translations: _t, cues: _c, ...rest } = a;
-  return rest;
+function lib(): Library {
+  if (!library) throw new Error("The library isn't available until its upgrade into the database succeeds.");
+  return library;
 }
 
-export function listArticles(): ArticleSummary[] {
+export async function listArticles(): Promise<ArticleSummary[]> {
+  return lib().listArticles();
+}
+
+export async function getArticle(id: string): Promise<Article | null> {
+  return lib().getArticle(id);
+}
+
+export async function saveArticle(article: Article): Promise<void> {
+  return lib().saveArticle(article);
+}
+
+export async function updateArticle(id: string, patch: Partial<Article>): Promise<void> {
+  return lib().updateArticle(id, patch);
+}
+
+export async function deleteArticle(id: string): Promise<void> {
+  return lib().removeArticle(id);
+}
+
+export async function putTranslations(id: string, tgt: string, map: Record<string, string>): Promise<void> {
+  return lib().putTranslations(id, tgt, map);
+}
+
+// ---------------------------------------------------------------- configuration (JSON)
+
+export function listUserSources(): UserSource[] {
   ensureDirs();
-  return readJson<ArticleSummary[]>(indexFile(), []).sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  return readJson<UserSource[]>(path.join(root(), "sources.json"), []);
 }
 
-export function getArticle(id: string): Article | null {
+export function saveUserSources(sources: UserSource[]) {
   ensureDirs();
-  return readJson<Article | null>(path.join(articlesDir(), `${id}.json`), null);
+  writeJson(path.join(root(), "sources.json"), sources);
 }
 
-export function saveArticle(article: Article) {
+/** The section ids a source's reader follows; `null` means never chosen (the default feeds apply). */
+export function getFollowed(sourceId: string): string[] | null {
+  return readJson<Record<string, string[]>>(path.join(root(), "followed.json"), {})[sourceId] ?? null;
+}
+
+/** `sections` are saved with the ids so followed discovered sections resolve without the discovery cache. */
+export function setFollowed(sourceId: string, ids: string[], sections: Section[] = []) {
   ensureDirs();
-  writeJson(path.join(articlesDir(), `${article.id}.json`), article);
-  const index = readJson<ArticleSummary[]>(indexFile(), []).filter((a) => a.id !== article.id);
-  index.push(summarize(article));
-  writeJson(indexFile(), index);
+  const file = path.join(root(), "followed.json");
+  writeJson(file, { ...readJson<Record<string, string[]>>(file, {}), [sourceId]: ids });
+  const sFile = path.join(root(), "followed-sections.json");
+  writeJson(sFile, { ...readJson<Record<string, Section[]>>(sFile, {}), [sourceId]: sections.filter((s) => ids.includes(s.id)) });
 }
 
-export function updateArticle(id: string, patch: Partial<Article>) {
-  const existing = getArticle(id);
-  if (!existing) return;
-  const next = { ...existing, ...patch, id: existing.id };
-  if (patch.translations) next.translations = { ...existing.translations, ...patch.translations };
-  saveArticle(next);
+export function getFollowedSections(): Record<string, Section[]> {
+  return readJson<Record<string, Section[]>>(path.join(root(), "followed-sections.json"), {});
 }
 
-export function deleteArticle(id: string) {
+/** Sections discovered on added sources' sites, so they load without the network. */
+export function getSectionsCache(): Record<string, Section[]> {
+  return readJson<Record<string, Section[]>>(path.join(root(), "sections-cache.json"), {});
+}
+
+export function setSectionsCache(sourceId: string, sections: Section[]) {
   ensureDirs();
-  fs.rmSync(path.join(articlesDir(), `${id}.json`), { force: true });
-  writeJson(indexFile(), readJson<ArticleSummary[]>(indexFile(), []).filter((a) => a.id !== id));
+  writeJson(path.join(root(), "sections-cache.json"), { ...getSectionsCache(), [sourceId]: sections });
 }
 
-export function listVocab(): VocabEntry[] {
+/** `null` when no stations file exists yet (first run). */
+export function loadStations(): SavedStation[] | null {
+  return sanitizeStations(readJson<unknown>(path.join(root(), "stations.json"), null));
+}
+
+export function saveStations(stations: SavedStation[]) {
   ensureDirs();
-  return readJson<VocabEntry[]>(vocabFile(), []);
-}
-
-export function addVocab(entry: Omit<VocabEntry, "id" | "addedAt">): VocabEntry {
-  const all = listVocab();
-  const existing = all.find((v) => v.lemma === entry.lemma && v.sentence === entry.sentence);
-  if (existing) return existing;
-  const full: VocabEntry = { ...entry, id: crypto.randomUUID(), addedAt: new Date().toISOString() };
-  all.push(full);
-  writeJson(vocabFile(), all);
-  return full;
-}
-
-export function updateVocab(id: string, patch: Partial<VocabEntry>) {
-  writeJson(vocabFile(), listVocab().map((v) => (v.id === id ? { ...v, ...patch, id } : v)));
+  writeJson(path.join(root(), "stations.json"), stations);
 }
 
 /** Which everyday browser the user copied logins from, if any, so Readr can
@@ -104,29 +135,57 @@ export function setLoginBrowser(browser: string) {
   writeJson(path.join(root(), "browser-login.json"), { browser });
 }
 
-/** Folder for screenshots and audio clips of saved video lines. */
-export function mediaDir(): string {
-  const dir = path.join(root(), "media");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+/** Sites whose logins the user chose to import from their browser. */
+export function getImportSites(): string[] {
+  return readJson<{ sites?: string[] }>(path.join(root(), "import-sites.json"), {}).sites ?? [];
 }
 
-export function removeVocab(id: string) {
-  writeJson(vocabFile(), listVocab().filter((v) => v.id !== id));
+export function setImportSites(sites: string[]) {
+  ensureDirs();
+  writeJson(path.join(root(), "import-sites.json"), { sites });
 }
 
-/** Anki-friendly TSV: Front (word + sentence) / Back (gloss + translation). */
-export function vocabToTsv(entries: VocabEntry[]): string {
-  const esc = (s: string) => s.replace(/\t/g, " ").replace(/\r?\n/g, " ");
-  const lines = ["#separator:tab", "#html:true", "#columns:Front\tBack\tTags"];
-  for (const v of entries) {
-    const highlighted = esc(v.sentence).replace(
-      new RegExp(`(${v.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "i"),
-      "<b>$1</b>",
-    );
-    const front = `<b>${esc(v.word)}</b><br><i>${highlighted}</i>`;
-    const back = `${esc(v.lemma)} — ${esc(v.gloss)}<br><i>${esc(v.sentenceTranslation)}</i>`;
-    lines.push(`${front}\t${back}\treadr`);
-  }
-  return lines.join("\n") + "\n";
+/** The model's label for each site, so only new sites are classified. */
+export function getSiteKinds(): Record<string, Classification> {
+  return readJson<Record<string, Classification>>(path.join(root(), "site-kinds.json"), {});
 }
+
+export function addSiteKinds(more: Record<string, Classification>) {
+  ensureDirs();
+  writeJson(path.join(root(), "site-kinds.json"), { ...getSiteKinds(), ...more });
+}
+
+/** Ids of built-in stations already offered to this user (they are never re-added once removed). */
+export function loadOfferedBuiltins(): string[] {
+  const raw = readJson<unknown>(path.join(root(), "builtin-stations.json"), []);
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+}
+
+export function saveOfferedBuiltins(ids: string[]) {
+  ensureDirs();
+  writeJson(path.join(root(), "builtin-stations.json"), ids);
+}
+
+/** `null` when no channels file exists yet (first run). */
+export function loadChannels(): SavedChannel[] | null {
+  return sanitizeChannels(readJson<unknown>(path.join(root(), "channels.json"), null));
+}
+
+export function saveChannels(channels: SavedChannel[]) {
+  ensureDirs();
+  writeJson(path.join(root(), "channels.json"), channels);
+}
+
+/** Ids of built-in TV channels already offered to this user (never re-added once removed). */
+export function loadOfferedChannels(): string[] {
+  const raw = readJson<unknown>(path.join(root(), "builtin-channels.json"), []);
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+}
+
+export function saveOfferedChannels(ids: string[]) {
+  ensureDirs();
+  writeJson(path.join(root(), "builtin-channels.json"), ids);
+}
+
+/** Where the Find channels index is cached. */
+export const tvCacheDir = () => root();

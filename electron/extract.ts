@@ -1,17 +1,27 @@
 // Article extraction. A hidden BrowserWindow in the logged-in session loads the
 // page as you; we inject Mozilla Readability and pull out clean blocks of text.
+// A site's browser check is waited out first (electron/browser-check.ts); a page that is a check,
+// or nothing like an article, is never returned as one.
 
 import { BrowserWindow, Session } from "electron";
 import fs from "node:fs";
-import type { Article, Block, ExtractResult, Lang } from "../shared/types";
+import type { Article, Block, ExtractResult, Lang, Site } from "../shared/types";
 import { splitSentences } from "../shared/segment";
+import { DEFAULT_LANG, normaliseLanguageTags } from "../shared/languages";
 import { articleIdFor } from "./store";
 import { siteForUrl } from "./sites";
+import { looksPaywalled } from "./paywall";
+import { HUMAN_CHECK, looksLikeBrowserCheck, waitPastCheck } from "./browser-check";
+
+/** Under this many words, a page Readability doesn't take for an article isn't read as one. */
+export const THIN_PAGE_WORDS = 80;
+export const NOT_AN_ARTICLE = "This page doesn't look like an article.";
 
 let readabilitySource: string | null = null;
 function getReadabilitySource(): string {
   if (!readabilitySource) {
-    readabilitySource = fs.readFileSync(require.resolve("@mozilla/readability/Readability.js"), "utf8");
+    // The reader, and its "is this page an article at all?" test.
+    readabilitySource = ["Readability.js", "Readability-readerable.js"].map((f) => fs.readFileSync(require.resolve(`@mozilla/readability/${f}`), "utf8")).join("\n");
   }
   return readabilitySource;
 }
@@ -21,10 +31,7 @@ const PAGE_SCRIPT = String.raw`
 (() => {
   const meta = (sel) => document.querySelector(sel)?.getAttribute("content") || "";
   const bodyText = document.body ? document.body.innerText : "";
-  const paywallPhrases = [
-    "Il vous reste", "La suite est réservée aux abonnés", "Cet article est réservé aux abonnés",
-    "réservé à nos abonnés", "Déjà abonné ?", "Pour lire la suite", "Article réservé aux abonnés",
-  ];
+  const readerable = isProbablyReaderable(document);
 
   const doc = document.cloneNode(true);
   // Site chrome Readability sometimes keeps.
@@ -67,7 +74,9 @@ const PAGE_SCRIPT = String.raw`
     image: meta("meta[property='og:image']") || "",
     siteName: meta("meta[property='og:site_name']") || parsed.siteName || location.hostname,
     lang: (document.documentElement.lang || parsed.lang || "").slice(0, 2).toLowerCase(),
-    paywallHint: paywallPhrases.some((p) => bodyText.includes(p)),
+    pageTitle: document.title,
+    readerable,
+    bodyText,
     blocks,
   };
 })();
@@ -90,14 +99,25 @@ function waitForLoad(win: BrowserWindow, timeoutMs: number): Promise<void> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function formatDate(iso: string): string {
+/** The publication date in the article's own locale ("6 novembre 2026", "٦ نوفمبر ٢٠٢٦"). */
+function formatDate(iso: string, lang: Lang): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+  try {
+    return new Intl.DateTimeFormat(lang, { day: "numeric", month: "long", year: "numeric" }).format(d);
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
 }
 
-export async function extractArticle(url: string, session: Session): Promise<ExtractResult> {
+/** The language a page declares (`<html lang="ar-LB">`), if Readr knows it. */
+function declaredLanguage(tag: unknown): Lang | undefined {
+  const base = typeof tag === "string" ? tag.trim().split(/[-_]/)[0] : "";
+  return base ? normaliseLanguageTags(base)[0] : undefined;
+}
+
+export async function extractArticle(url: string, session: Session, sites?: Site[]): Promise<ExtractResult> {
   const win = new BrowserWindow({
     show: false,
     width: 1280,
@@ -118,19 +138,25 @@ export async function extractArticle(url: string, session: Session): Promise<Ext
     const loaded = waitForLoad(win, 45_000);
     await win.loadURL(url).catch(() => undefined); // errors surface through waitForLoad
     await loaded;
+    // A browser check passes by itself in a real browser, then the article loads: wait for that.
+    if (!(await waitPastCheck(win.webContents))) return { ok: false, browserCheck: true, error: HUMAN_CHECK };
     await sleep(1200); // let late hydration finish
 
     const raw = await win.webContents.executeJavaScript(`${getReadabilitySource()}\n${PAGE_SCRIPT}`, true);
     if (!raw?.ok) return { ok: false, error: raw?.error ?? "Extraction failed." };
+    // A check that appeared late (after the page had loaded) is still not the article.
+    if (looksLikeBrowserCheck({ title: String(raw.pageTitle ?? ""), text: String(raw.bodyText ?? "") })) return { ok: false, browserCheck: true, error: HUMAN_CHECK };
 
     const finalUrl = win.webContents.getURL() || url;
-    const lang: Lang = raw.lang === "en" || raw.lang === "ar" ? raw.lang : "fr";
+    // The source's language wins: some sites mislabel their pages (L'Orient-Le
+    // Jour declares English on French articles).
+    const site = siteForUrl(finalUrl, sites);
+    const lang: Lang = site?.lang ?? declaredLanguage(raw.lang) ?? DEFAULT_LANG;
     const blocks: Block[] = (raw.blocks as { type: Block["type"]; text: string }[])
       .map((b) => ({ type: b.type, sentences: b.type === "h" ? [b.text] : splitSentences(b.text, lang) }))
       .filter((b) => b.sentences.length > 0);
 
     const wordCount = blocks.reduce((n, b) => n + b.sentences.join(" ").split(/\s+/).length, 0);
-    const site = siteForUrl(finalUrl);
     const article: Article = {
       id: articleIdFor(finalUrl),
       url: finalUrl,
@@ -138,7 +164,7 @@ export async function extractArticle(url: string, session: Session): Promise<Ext
       title: raw.title,
       subtitle: raw.subtitle,
       author: raw.author,
-      date: formatDate(raw.published),
+      date: formatDate(raw.published, lang),
       readingTime: Math.max(1, Math.round(wordCount / 200)),
       imageUrl: raw.image,
       language: lang,
@@ -148,8 +174,10 @@ export async function extractArticle(url: string, session: Session): Promise<Ext
       savedAt: new Date().toISOString(),
     };
 
-    // A short body plus paywall wording usually means we are not logged in.
-    const paywalled = Boolean(raw.paywallHint) && wordCount < 600;
+    // A short body plus a truncation marker usually means we are not logged in.
+    const paywalled = looksPaywalled(String(raw.bodyText ?? ""), wordCount);
+    // A few words on a page that isn't an article (an error page, a check Readr doesn't know): not one to keep.
+    if (!paywalled && !raw.readerable && wordCount < THIN_PAGE_WORDS) return { ok: false, error: NOT_AN_ARTICLE };
     return { ok: true, article, paywalled };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

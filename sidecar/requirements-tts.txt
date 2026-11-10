@@ -1,0 +1,7 @@
+# Magpie voice server (sidecar/tts_server.py), in its own venv: sidecar/.venv-tts
+# NeMo pins heavy dependencies; keeping them apart protects the translator.
+nemo_toolkit[tts]==3.0.0
+kaldialign
+fastapi
+uvicorn
+num2words
